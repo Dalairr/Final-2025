@@ -1,0 +1,91 @@
+pipeline {
+  // initial test pipeline. will add stages for testing once more things are up and running.
+  agent any
+
+  environment {
+    // fill these in with your actual values in Jenkins
+    DOCKERHUB_CREDENTIALS = ''
+    IMAGE_NAME = ''
+    // optional: adjust severity threshold used by Snyk
+    SNYK_SEVERITY_THRESHOLD = 'medium'
+  }
+
+  stages {
+
+    stage('Cloning Git') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Build-And-Tag') {
+      agent {
+        label 'appserver'
+      }
+      steps {
+        script {
+          // Build Docker image using Jenkins Docker Pipeline API
+          echo "Building Docker image ${IMAGE_NAME}..."
+          app = docker.build("${IMAGE_NAME}")
+          app.tag("latest")
+        }
+      }
+    }
+
+    stage('Snyk-Container-Scan') {
+      agent {
+        label 'appserver'
+      }
+      steps {
+        // Requires: Snyk CLI installed on this agent
+        // Requires: Jenkins "String" credential with ID "snyk-api-token"
+        withCredentials([
+          string(credentialsId: 'snyk-api-token', variable: 'SNYK_TOKEN')
+        ]) {
+          sh """
+            echo "Running Snyk container scan for ${IMAGE_NAME}:latest ..."
+            snyk auth "\${SNYK_TOKEN}"
+
+            # Test the built Docker image. Adjust options as needed:
+            snyk container test ${IMAGE_NAME}:latest \\
+              --file=Dockerfile \\
+              --severity-threshold=${SNYK_SEVERITY_THRESHOLD}
+          """
+        }
+      }
+    }
+
+    stage('Post-To-Dockerhub') {    
+      agent {
+        label 'appserver-agent'
+      }
+      steps {
+        script {
+          echo "Pushing image ${IMAGE_NAME}:latest to Docker Hub..."
+          docker.withRegistry('https://registry.hub.docker.com', "${DOCKERHUB_CREDENTIALS}") {
+            app.push("latest")
+          }
+        }
+      }
+    }
+
+    stage('DEPLOYMENT') {    
+      agent {
+        label 'appserver'
+      }
+      steps {
+        echo 'Starting deployment using docker-compose...'
+        script {
+          dir("${WORKSPACE}") {
+            sh '''
+              docker-compose down
+              docker-compose up -d
+              docker ps
+            '''
+          }
+        }
+        echo 'Deployment completed successfully!'
+      }
+    }
+  }  
+}
